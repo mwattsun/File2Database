@@ -21,7 +21,8 @@ const string Usage = """
                 as yyyy-MM-dd HH:mm:ss
       modified  LAST_MODIFIED, or created when there is none
       tags      the folders the link is in, outermost first, separated by ", "
-                (Philosophy > Eastern -> "Philosophy, Eastern")
+                (Philosophy > Eastern -> "Philosophy, Eastern"). The browser's
+                toolbar folder (Bookmarks Toolbar, Bookmarks bar) is left out.
 
     A link that is in more than one folder gets a row for each.
 
@@ -138,8 +139,10 @@ int Run(string[] args)
     var modified = insert.Parameters.Add("$modified", SqliteType.Text);
     var tags = insert.Parameters.Add("$tags", SqliteType.Text);
 
-    // Names of the folders we're in, outermost first.
-    var folders = new List<string>();
+    // Names of the folders we're in, outermost first. The browser's toolbar folder
+    // (Firefox's "Bookmarks Toolbar", Chrome's "Bookmarks bar", Edge's "Favorites
+    // bar") is null, so it doesn't become a tag on everything in it.
+    var folders = new List<string?>();
     int linkCount = 0, problems = 0;
 
     foreach (var rawLine in File.ReadLines(file, Encoding.UTF8))
@@ -162,15 +165,19 @@ int Run(string[] args)
             url.Value = href;
             created.Value = FormatDate(added);
             modified.Value = FormatDate(GetDate(attrs, "LAST_MODIFIED") ?? added);
-            tags.Value = string.Join(", ", folders);
+            tags.Value = string.Join(", ", folders.OfType<string>());
             insert.ExecuteNonQuery();
             linkCount++;
         }
         else if (line.StartsWith("<DT><H3", StringComparison.OrdinalIgnoreCase))
         {
             var m = folderRegex.Match(line);
+            var attrs = m.Success ? ParseAttributes(m.Groups["attrs"].Value) : [];
             var name = m.Success ? CleanTitle(TagText(m.Groups["text"].Value)) : "";
-            folders.Add(name.Length > 0 ? name : "untitled");
+            if (attrs.TryGetValue("PERSONAL_TOOLBAR_FOLDER", out var toolbar) && toolbar.Equals("true", StringComparison.OrdinalIgnoreCase))
+                folders.Add(null);
+            else
+                folders.Add(name.Length > 0 ? name : "untitled");
         }
         else if (line.StartsWith("</DL>", StringComparison.OrdinalIgnoreCase))
         {

@@ -26,7 +26,7 @@ Exit code is 0 on success, 1 if the bookmarks file can't be read or the database
 | `url` | The link's address |
 | `created` | When the bookmark was added (`ADD_DATE`), local time, as `yyyy-MM-dd HH:mm:ss` |
 | `modified` | `LAST_MODIFIED`, or `created` when there is none |
-| `tags` | The folders the link is in, outermost first, separated by `, ` — a link in *Philosophy › Eastern* gets `Philosophy, Eastern` |
+| `tags` | The folders the link is in, outermost first, separated by `, ` — a link in *Philosophy › Eastern* gets `Philosophy, Eastern`. The browser's toolbar folder (Firefox's *Bookmarks Toolbar*, Chrome's *Bookmarks bar*, Edge's *Favorites bar*) is left out |
 
 A link that is in more than one folder gets a row for each. Titles and folder names keep everything except extra whitespace (runs of spaces become one), `�` (which becomes `-`), YouTube's `▶ ` marker and leading `(3) ` notification counts.
 
