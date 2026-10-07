@@ -12,9 +12,9 @@ const string Usage = """
 
     The database defaults to the bookmarks file with a .db extension
     (bookmarks_10_5_26.html -> bookmarks_10_5_26.db). It has one table,
-    bookmarks, with a row per link:
+    bookmarks, with a row per URL:
 
-      id        row number, in the order the links appear in the file
+      id        row number, in the order links were first added
       title     the link's title
       url       the link's address
       created   when the bookmark was added (ADD_DATE), local time,
@@ -23,11 +23,19 @@ const string Usage = """
       tags      the folders the link is in, outermost first, separated by ", "
                 (Philosophy > Eastern -> "Philosophy, Eastern"). The browser's
                 toolbar folder (Bookmarks Toolbar, Bookmarks bar) is left out.
+                A link in more than one folder lists each, separated by " | "
+                ("Philosophy, Eastern | Reading").
 
-    A link that is in more than one folder gets a row for each.
+    A link that appears more than once keeps the created and modified dates of
+    its earliest copy (the one with the earliest created date).
+
+    If the database already exists, the bookmarks are merged into it: new links
+    are added, and links already there get the title and tags from this file but
+    keep whichever created and modified dates are earliest. Links that aren't in
+    this file are left alone.
 
     Options:
-      --overwrite   replace the database if it already exists
+      --overwrite   replace the database instead of merging into it
       -h, --help    show this help
 
     """;
@@ -76,20 +84,21 @@ int Run(string[] args)
         return 1;
     }
     var database = Path.GetFullPath(positionals.Count > 1 ? positionals[1] : Path.ChangeExtension(file, ".db"));
-    if (File.Exists(database) && !overwrite)
-    {
-        Console.Error.WriteLine($"{database} already exists. Use --overwrite to replace it.");
-        return 1;
-    }
+    bool merge = File.Exists(database) && !overwrite;
 
-    // Build the database under a temporary name and swap it in at the end, so a
-    // failure part way through leaves any existing database alone.
+    var (links, problems) = ReadLinks(file);
+
+    // Work on a temporary copy and swap it in at the end, so a failure part way
+    // through leaves any existing database alone.
     var temp = database + ".tmp";
-    int linkCount, problems;
+    int added;
     try
     {
-        File.Delete(temp);
-        (linkCount, problems) = Load(file, temp);
+        if (merge)
+            File.Copy(database, temp, overwrite: true);
+        else
+            File.Delete(temp);
+        added = Save(links, temp);
         SqliteConnection.ClearAllPools();   // release the file so it can be moved
         File.Move(temp, database, overwrite: true);
     }
@@ -98,52 +107,32 @@ int Run(string[] args)
         SqliteConnection.ClearAllPools();
         try { File.Delete(temp); } catch (IOException) { }
         Console.Error.WriteLine($"Can't write {database}: {e.Message}");
-        if (e is IOException)
+        if (e is SqliteException { SqliteErrorCode: 19 })    // constraint failed
+            Console.Error.WriteLine("It has the same URL in more than one row (made by an older File2Database?). Use --overwrite to rebuild it.");
+        else if (e is IOException)
             Console.Error.WriteLine("If it's open in DB Browser, close it and try again.");
         return 1;
     }
 
-    Console.WriteLine($"{linkCount} links written to {database}"
-        + (problems > 0 ? $" ({problems} problems, see above)" : ""));
+    Console.WriteLine(merge
+        ? $"{links.Count} links merged into {database}: {added} new, {links.Count - added} already there"
+        : $"{links.Count} links written to {database}");
+    if (problems > 0)
+        Console.WriteLine($"{problems} problems, see above");
     return problems > 0 ? 2 : 0;
 }
 
-(int Links, int Problems) Load(string file, string database)
+// Read the links in the bookmarks file, one per URL, in the order they first appear.
+(List<Link> Links, int Problems) ReadLinks(string file)
 {
-    using var connection = new SqliteConnection($"Data Source={database}");
-    connection.Open();
-    using var transaction = connection.BeginTransaction();
-
-    var create = connection.CreateCommand();
-    create.CommandText = """
-        CREATE TABLE bookmarks (
-            id       INTEGER PRIMARY KEY,
-            title    TEXT NOT NULL,
-            url      TEXT NOT NULL,
-            created  TEXT,
-            modified TEXT,
-            tags     TEXT NOT NULL
-        );
-        CREATE INDEX bookmarks_url ON bookmarks (url);
-        """;
-    create.ExecuteNonQuery();
-
-    var insert = connection.CreateCommand();
-    insert.CommandText = """
-        INSERT INTO bookmarks (title, url, created, modified, tags)
-        VALUES ($title, $url, $created, $modified, $tags)
-        """;
-    var title = insert.Parameters.Add("$title", SqliteType.Text);
-    var url = insert.Parameters.Add("$url", SqliteType.Text);
-    var created = insert.Parameters.Add("$created", SqliteType.Text);
-    var modified = insert.Parameters.Add("$modified", SqliteType.Text);
-    var tags = insert.Parameters.Add("$tags", SqliteType.Text);
+    var links = new List<Link>();
+    var byUrl = new Dictionary<string, Link>(StringComparer.Ordinal);
+    int problems = 0;
 
     // Names of the folders we're in, outermost first. The browser's toolbar folder
     // (Firefox's "Bookmarks Toolbar", Chrome's "Bookmarks bar", Edge's "Favorites
     // bar") is null, so it doesn't become a tag on everything in it.
     var folders = new List<string?>();
-    int linkCount = 0, problems = 0;
 
     foreach (var rawLine in File.ReadLines(file, Encoding.UTF8))
     {
@@ -153,21 +142,30 @@ int Run(string[] args)
         {
             var m = linkRegex.Match(line);
             var attrs = m.Success ? ParseAttributes(m.Groups["attrs"].Value) : null;
-            if (attrs == null || !attrs.TryGetValue("HREF", out var href) || href.Length == 0)
+            if (attrs == null || !attrs.TryGetValue("HREF", out var url) || url.Length == 0)
             {
                 Console.WriteLine($"Link line not parsed correctly: {line}");
                 problems++;
                 continue;
             }
 
-            var added = GetDate(attrs, "ADD_DATE");
-            title.Value = CleanTitle(TagText(m.Groups["text"].Value));
-            url.Value = href;
-            created.Value = FormatDate(added);
-            modified.Value = FormatDate(GetDate(attrs, "LAST_MODIFIED") ?? added);
-            tags.Value = string.Join(", ", folders.OfType<string>());
-            insert.ExecuteNonQuery();
-            linkCount++;
+            var created = GetDate(attrs, "ADD_DATE");
+            var modified = GetDate(attrs, "LAST_MODIFIED") ?? created;
+            var path = string.Join(", ", folders.OfType<string>());
+
+            if (!byUrl.TryGetValue(url, out var link))
+            {
+                link = new Link(CleanTitle(TagText(m.Groups["text"].Value)), url, created, modified);
+                byUrl.Add(url, link);
+                links.Add(link);
+            }
+            else if (IsEarlier(created, link.Created))
+            {
+                link.Created = created;
+                link.Modified = modified;
+            }
+            if (path.Length > 0 && !link.Paths.Contains(path))
+                link.Paths.Add(path);
         }
         else if (line.StartsWith("<DT><H3", StringComparison.OrdinalIgnoreCase))
         {
@@ -187,9 +185,75 @@ int Run(string[] args)
         }
     }
 
-    transaction.Commit();
-    return (linkCount, problems);
+    return (links, problems);
 }
+
+// A date beats no date; otherwise the earlier one wins.
+bool IsEarlier(DateTime? a, DateTime? b) => a is { } x && (b is not { } y || x < y);
+
+// Write the links into the database, creating the table if it isn't there yet.
+// Returns how many were new.
+int Save(List<Link> links, string database)
+{
+    using var connection = new SqliteConnection($"Data Source={database}");
+    connection.Open();
+    using var transaction = connection.BeginTransaction();
+
+    var create = connection.CreateCommand();
+    create.CommandText = """
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            id       INTEGER PRIMARY KEY,
+            title    TEXT NOT NULL,
+            url      TEXT NOT NULL,
+            created  TEXT,
+            modified TEXT,
+            tags     TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_url_unique ON bookmarks (url);
+        """;
+    create.ExecuteNonQuery();
+
+    var count = connection.CreateCommand();
+    count.CommandText = "SELECT count(*) FROM bookmarks";
+    long before = (long)count.ExecuteScalar()!;
+
+    // For a URL that's already there, take the new title and tags, and keep the
+    // created/modified pair with the earliest created date. SET expressions all
+    // see the row as it was, so both dates are judged on the old created value.
+    // The dates are yyyy-MM-dd HH:mm:ss text, which compares in date order.
+    var upsert = connection.CreateCommand();
+    upsert.CommandText = """
+        INSERT INTO bookmarks (title, url, created, modified, tags)
+        VALUES ($title, $url, $created, $modified, $tags)
+        ON CONFLICT (url) DO UPDATE SET
+            title = excluded.title,
+            tags = excluded.tags,
+            created = CASE WHEN excluded.created < created OR (created IS NULL AND excluded.created IS NOT NULL)
+                           THEN excluded.created ELSE created END,
+            modified = CASE WHEN excluded.created < created OR (created IS NULL AND excluded.created IS NOT NULL)
+                            THEN excluded.modified ELSE modified END
+        """;
+    var title = upsert.Parameters.Add("$title", SqliteType.Text);
+    var url = upsert.Parameters.Add("$url", SqliteType.Text);
+    var created = upsert.Parameters.Add("$created", SqliteType.Text);
+    var modified = upsert.Parameters.Add("$modified", SqliteType.Text);
+    var tags = upsert.Parameters.Add("$tags", SqliteType.Text);
+
+    foreach (var link in links)
+    {
+        title.Value = link.Title;
+        url.Value = link.Url;
+        created.Value = FormatDate(link.Created);
+        modified.Value = FormatDate(link.Modified);
+        tags.Value = string.Join(" | ", link.Paths);
+        upsert.ExecuteNonQuery();
+    }
+
+    long after = (long)count.ExecuteScalar()!;
+    transaction.Commit();
+    return (int)(after - before);
+}
+
 
 Dictionary<string, string> ParseAttributes(string attrs)
 {
@@ -235,3 +299,13 @@ DateTime? GetDate(Dictionary<string, string> attrs, string key)
 // functions take it as is.
 object FormatDate(DateTime? utc) =>
     utc is { } d ? d.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) : DBNull.Value;
+
+// One URL from the bookmarks file, with every folder path it was found in.
+class Link(string title, string url, DateTime? created, DateTime? modified)
+{
+    public string Title { get; } = title;
+    public string Url { get; } = url;
+    public DateTime? Created { get; set; } = created;
+    public DateTime? Modified { get; set; } = modified;
+    public List<string> Paths { get; } = [];
+}
