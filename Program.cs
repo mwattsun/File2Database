@@ -25,6 +25,7 @@ const string Usage = """
                 toolbar folder (Bookmarks Toolbar, Bookmarks bar) is left out.
                 A link in more than one folder lists each, separated by " | "
                 ("Philosophy, Eastern | Reading").
+      notes     empty, for your own notes; merging never changes it
 
     A link that appears more than once keeps the created and modified dates of
     its earliest copy (the one with the earliest created date).
@@ -207,11 +208,22 @@ int Save(List<Link> links, string database)
             url      TEXT NOT NULL,
             created  TEXT,
             modified TEXT,
-            tags     TEXT NOT NULL
+            tags     TEXT NOT NULL,
+            notes    TEXT
         );
         CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_url_unique ON bookmarks (url);
         """;
     create.ExecuteNonQuery();
+
+    // Databases made before the notes column existed get it added.
+    var columns = connection.CreateCommand();
+    columns.CommandText = "SELECT count(*) FROM pragma_table_info('bookmarks') WHERE name = 'notes'";
+    if ((long)columns.ExecuteScalar()! == 0)
+    {
+        var addNotes = connection.CreateCommand();
+        addNotes.CommandText = "ALTER TABLE bookmarks ADD COLUMN notes TEXT";
+        addNotes.ExecuteNonQuery();
+    }
 
     var count = connection.CreateCommand();
     count.CommandText = "SELECT count(*) FROM bookmarks";

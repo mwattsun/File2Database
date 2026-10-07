@@ -27,6 +27,7 @@ Exit code is 0 on success, 1 if the bookmarks file can't be read or the database
 | `created` | When the bookmark was added (`ADD_DATE`), local time, as `yyyy-MM-dd HH:mm:ss` |
 | `modified` | `LAST_MODIFIED`, or `created` when there is none |
 | `tags` | The folders the link is in, outermost first, separated by `, ` — a link in *Philosophy › Eastern* gets `Philosophy, Eastern`. The browser's toolbar folder (Firefox's *Bookmarks Toolbar*, Chrome's *Bookmarks bar*, Edge's *Favorites bar*) is left out. A link in more than one folder lists each, separated by ` \| ` — `Philosophy, Eastern \| Reading` |
+| `notes` | Empty, for your own notes. Merging never changes it |
 
 There is one row per URL. When a URL appears more than once, it keeps the created and modified dates of its earliest copy (the one with the earliest created date), and the title of the first one in the file.
 
@@ -37,7 +38,7 @@ Titles and folder names keep everything except extra whitespace (runs of spaces 
 Running File2Database on a newer export with the same database merges it in, so the database can keep growing as you export over time:
 
 - Links not in the database yet are added.
-- Links already there get the title and tags from the new file, but keep whichever created and modified dates are earliest.
+- Links already there get the title and tags from the new file, but keep whichever created and modified dates are earliest. Their `notes` are never touched, so hand edits there are safe; edits to `title` and `tags` are replaced by the new file's.
 - Links that aren't in the new file are left alone, so bookmarks you've deleted in the browser stay in the database.
 
 The work is done on a temporary copy that is swapped in at the end, so if something goes wrong the existing database is left alone. A database made by the first version of File2Database (with a row per copy of a link) can't be merged into; rebuild it with `--overwrite`.
